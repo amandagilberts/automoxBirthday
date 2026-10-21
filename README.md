@@ -1,2 +1,266 @@
 # automoxBirthday
-coding exercise for Automox for full stack engineer position
+
+A coding exercise for the Automox Full Stack Engineer process. Users submit a name and birthday through a Vue UI. A Node API validates the request and publishes it to a message queue. A Spring Boot Coordinator consumes the message and stores it in Postgres. The API then serves the stored birthdays back to the UI.
+
+## Architecture
+
+```
+Vue UI  --POST-->  Node API  --publish-->  RabbitMQ  --consume-->  Spring Boot Coordinator
+   ^                  |                                                   |
+   |                  +------ GET /birthdays (reads) ---- Postgres <------+ (writes)
+   +------------------+
+```
+
+| Component | Tech | Port | Folder |
+|---|---|---|---|
+| UI | Vue 3 + TypeScript (Vite) | 5173 | `ui/` |
+| Backend API | Node.js + Express + TypeScript | 3000 | `api/` |
+| Backend Coordinator | Spring Boot 4 (Java) | 8082 | `coordinator/demo/` |
+| Message queue | RabbitMQ (management image) | 5672, UI on 15672 | `docker-compose.yml` |
+| Data store | PostgreSQL 13 | 5432 | `docker-compose.yml` |
+
+Adjust the folder names above if yours differ.
+
+### Request flow
+
+1. The UI sends `POST /birthdays` with `name` and `birthday`.
+2. The API validates the body, generates a UUID, publishes a message to the `birthday_queue` queue, and returns `202 Accepted` with the new `id`. It does not write to the database.
+3. The Coordinator consumes the message and saves it to Postgres. If a row with the same `id` already exists, it skips the message (idempotent).
+4. The UI calls `GET /birthdays` to list entries. The API reads straight from Postgres.
+
+## Features
+
+- Submit a birthday (name and date) from the UI.
+- View the list of saved birthdays, with loading, empty, and error states.
+- API validation: required name, a real calendar date (`2024-02-30` is rejected), and no future dates.
+- `GET /birthdays/:id` returns a single entry (`400` for a malformed id, `404` if not found).
+- Idempotent consumer: a redelivered message never creates a duplicate row.
+- Unit tests for the API validation and routes, using a fake publisher and fake repository.
+- Reminder job in the Coordinator that runs daily and looks 14 days ahead (see [Status](#status-and-known-limitations)).
+
+## Prerequisites
+
+- **Docker Desktop** (running)
+- **Node.js 20+** and npm
+- **Java 17+** (developed with Temurin 21). Maven is not needed, because the project includes `./mvnw`.
+- **Git**
+
+Check with:
+
+```
+docker --version
+node --version
+java --version
+```
+
+## Run it locally
+
+Open four terminals. Start things in this order, because the Coordinator creates the database table and the API only reads it.
+
+### 1. Infrastructure (RabbitMQ and Postgres)
+
+From the repo root:
+
+```
+docker compose up -d
+docker compose ps
+```
+
+Both `rabbitmq` and `postgres` should be running. Wait a few seconds for Postgres to be ready.
+
+- RabbitMQ management UI: http://localhost:15672 (user: `user`, password: `password`)
+- Postgres: `localhost:5432`, database, user, and password are all `birthdays`
+
+These are development-only credentials.
+
+### 2. Coordinator
+
+```
+cd coordinator/demo
+./mvnw spring-boot:run
+```
+
+Wait for `Started DemoApplication`. In the RabbitMQ UI, **Queues > birthday_queue** should show 1 consumer. After you change or move Java files, use `./mvnw clean spring-boot:run` so stale compiled classes don't linger.
+
+### 3. API
+
+```
+cd api
+npm install
+npm run dev
+```
+
+You should see `Server is running on port 3000`.
+
+### 4. UI
+
+```
+cd ui
+npm install
+npm run dev
+```
+
+Open http://localhost:5173.
+
+The UI calls `/api/...`. Vite's dev server proxies those requests to the API so the browser doesn't hit a CORS error. In `ui/vite.config.ts`:
+
+```ts
+export default defineConfig({
+  plugins: [vue()],
+  server: {
+    proxy: {
+      "/api": {
+        target: "http://localhost:3000",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+    },
+  },
+});
+```
+
+## Configuration
+
+Every setting has a default that matches `docker-compose.yml`, so no `.env` file is required. To override, create `api/.env` (it is git-ignored):
+
+| Variable | Default |
+|---|---|
+| `PORT` | `3000` |
+| `RABBITMQ_HOSTNAME` | `localhost` |
+| `RABBITMQ_PORT` | `5672` |
+| `RABBITMQ_USERNAME` | `user` |
+| `RABBITMQ_PASSWORD` | `password` |
+| `RABBITMQ_QUEUE` | `birthday_queue` |
+| `DB_HOST` / `DB_PORT` | `localhost` / `5432` |
+| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `birthdays` |
+
+The Coordinator reads `coordinator/demo/src/main/resources/application.yml`. The queue name is the custom property `app.queue-name`.
+
+## Message contract
+
+This is the shared agreement between the Node API (publisher) and the Spring Boot Coordinator (consumer). Both sides must match it exactly.
+
+```json
+{ "id": "3f2b8c1e-5a4d-4c0e-9b1a-2d7f6e8a9c10", "name": "Ada Lovelace", "birthday": "1815-12-10" }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string (UUID) | Generated by the API. It is the primary key, which makes the consumer idempotent. |
+| `name` | string | Required, trimmed, 1 to 100 characters. |
+| `birthday` | string `YYYY-MM-DD` | A date only, with no time or timezone. It must be a real calendar date and not in the future. |
+
+- Queue: `birthday_queue` (durable). Messages are published as persistent JSON.
+- Java side: `BirthdayMessage(UUID id, String name, LocalDate birthday)`, converted with a Jackson JSON message converter.
+
+## API reference
+
+### `POST /birthdays`
+
+```
+curl -i -X POST http://localhost:3000/birthdays \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ada Lovelace","birthday":"1815-12-10"}'
+```
+
+`202 Accepted`:
+
+```json
+{ "id": "3f2b8c1e-5a4d-4c0e-9b1a-2d7f6e8a9c10" }
+```
+
+- `400` for invalid input, with `details` listing what failed.
+- `503` if the message broker is unavailable.
+
+The entry is not readable until the Coordinator has processed the message, which usually takes well under a second (eventual consistency).
+
+### `GET /birthdays`
+
+`200 OK`, sorted by name:
+
+```json
+{ "birthdays": [ { "id": "3f2b8c1e-...", "name": "Ada Lovelace", "birthday": "1815-12-10" } ] }
+```
+
+An empty table returns `{ "birthdays": [] }`. `503` if the database is unavailable.
+
+### `GET /birthdays/:id`
+
+- `200` with a single object, the same shape as a list item.
+- `400` if `id` is not a UUID.
+- `404` if no entry exists. This is also what you see right after a POST, before the Coordinator has saved the row.
+- `503` if the database is unavailable.
+
+### `GET /health`
+
+`200` with `{ "status": "ok" }`.
+
+## Tests
+
+```
+cd api
+npm test
+```
+
+Vitest and Supertest cover the date validation helpers, the validation schema, and the routes. The routes are tested without a running broker or database, because `createApp` takes the publisher and repository as parameters and the tests pass fakes.
+
+Quick manual idempotency check: in the RabbitMQ UI, open **Queues > birthday_queue > Publish message** and send this body twice:
+
+```json
+{"id":"11111111-1111-1111-1111-111111111111","name":"Test","birthday":"1990-01-01"}
+```
+
+You should see one row in Postgres and a "Duplicate message skipped" line in the Coordinator log.
+
+Inspect the data directly with:
+
+```
+docker compose exec postgres psql -U birthdays -d birthdays -c "select * from birthday;"
+```
+
+## Design decisions and assumptions
+
+- **Publish, don't write.** The API only publishes. The Coordinator is the only writer, so the API stays fast and the write path can be retried independently.
+- **`202 Accepted`.** Persistence is asynchronous, so the API answers "accepted", not "created".
+- **Date-only birthdays.** They are stored as a Postgres `DATE` and a Java `LocalDate`, and the API reads them with `to_char(...)` so a JavaScript `Date` is never built. This avoids timezone shifts. Validation round-trips year, month, and day through `Date.UTC`, because `Date.parse` accepts impossible dates like Feb 30 in some engines.
+- **Client-independent ids.** The API generates the UUID, and the Coordinator uses it as the primary key, so redelivered messages are harmless.
+- **Shared database.** The Coordinator owns the schema (`ddl-auto: update`) and the API only reads. This is a pragmatic shortcut for a short exercise.
+- **Testable seams.** The publisher and repository are interfaces injected into `createApp`.
+- **RabbitMQ** was chosen over Kafka or Redis: it is a real broker with a management UI, and it is quick to set up and debug.
+- **Reminders** are defined as "birthdays occurring within the next 14 days, checked once a day". The window is a setting rather than a hardcoded value.
+- Both backends declare the queue as durable, because RabbitMQ rejects a redeclaration with different settings.
+
+## Status and known limitations
+
+Be explicit about what is and isn't done:
+
+- [x] API: validation, publish, list, get-by-id
+- [x] Coordinator: consume, idempotent save to Postgres
+- [x] Vue UI: add form and list with loading, empty, and error states
+- [ ] Reminder job: a daily `@Scheduled` task in the Coordinator (add `@EnableScheduling`), logging or publishing an event for upcoming birthdays. Real email or push delivery is out of scope.
+- [ ] UI detail view for a single birthday (the API endpoint exists)
+- [ ] Coordinator unit tests (JUnit) and UI tests (Vue Test Utils)
+
+Known limitations and what I would do next:
+
+- No automatic reconnect if RabbitMQ or Postgres drops while the API is running.
+- The publisher doesn't use confirm channels, so a published message is not acknowledged by the broker.
+- No dead-letter queue. Bad messages are rejected without requeue (`default-requeue-rejected: false`) and dropped.
+- `ddl-auto: update` should be replaced by Flyway migrations.
+- A shared database couples the API and the Coordinator. Production would expose reads through the Coordinator or use a read model.
+- No authentication, and no edit or delete.
+- The "not in the future" check uses UTC, so it can be off by a day near midnight in other timezones.
+- The Postgres 13 image is near end of life, so `postgres:16` would be better. Hibernate logs a warning for it.
+- Credentials are development defaults and must not be used outside local development.
+- A Dockerfile and compose services for the API, Coordinator, and UI would make this a one-command start.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `Cannot GET /birthdays` | The API is running old code. Restart `npm run dev` and check the route is mounted at `/birthdays`. |
+| `Connection to localhost:5432 refused` | Docker or the Postgres container isn't running. Run `docker compose up -d`. |
+| Port 8080 already in use | Set `server.port` (top level, not under `spring:`) in `application.yml`. This project uses 8082. |
+| `202` but nothing in Postgres | The Coordinator isn't consuming. Check that Consumers is 1 in the RabbitMQ UI and that there is no old Coordinator process still running. |
+| Docker warns about multiple config files | Delete any generated `compose.yaml` and keep a single compose file. |
+| UI shows a network or 404 error | The Vite `/api` proxy is missing, or the API isn't running on port 3000. |

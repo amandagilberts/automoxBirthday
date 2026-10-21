@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: coordinator
+  datasource:
+    url: jdbc:postgresql://localhost:5432/birthdays
+    username: birthdays
+    password: birthdays
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: user
+    password: password
+    listener:
+      simple:
+        default-requeue-rejected: false
+  jpa:
+    hibernate:
+      ddl-auto: update
+server:
+    port: 8082    
+
+app:
+  queue-name: birthday_queue
