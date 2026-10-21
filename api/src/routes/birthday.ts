@@ -1,32 +1,58 @@
-   import express from "express";
-    import { validateBirthdayMessage } from "../messaging/validation.js";
-    import type error from "zod";
-    import type { BirthdayMessage } from "../types.js";
-    import type { Publisher } from "../messaging/publisher.js";
-    
-    export const createBirthdayRouter = (publisher: Publisher) => {
- 
-    const router = express.Router();
-    
-    router.post("/", async (req, res) => {  
-        const message: BirthdayMessage = {
-            name: req.body.name,
-            birthday: req.body.birthday,
-            id: crypto.randomUUID(),
-        };
-       
-            const validationResult = validateBirthdayMessage.safeParse(message);
-            if (!validationResult.success) {
-                throw new Error(`Invalid message format: ${validationResult.error}`);
-            }
-        try {
-            await publisher.publishBirthdayMessage(message);
-            res.status(200).json({ status: "Message published successfully with this id: " , id: message.id });
-        } catch (error) {
-            console.error("Error publishing message:", error);
-            res.status(500).json({ status: "Error publishing message", error: "Message could not be published" });
-        }
-    });
+import express from "express";
+import { z } from "zod";
+import type { Publisher } from "../messaging/publisher.js";
+import type { BirthdayRepository } from "../db/repository.js";
+import type { BirthdayMessage } from "../types.js";
+import { validateBirthdayMessage } from "../messaging/validation.js";
 
-    return router;
-}
+const idSchema = z.string().uuid();
+
+export const createBirthdayRouter = (
+  publisher: Publisher,
+  repository: BirthdayRepository
+) => {
+  const router = express.Router();
+
+router.post("/", async (req, res) => {
+  const result = validateBirthdayMessage.safeParse(req.body);
+  if (!result.success) {
+    return res.status(400).json({ error: "Invalid request", details: result.error.issues });
+  }
+  const message: BirthdayMessage = { id: crypto.randomUUID(), ...result.data };
+  try {
+    await publisher.publishBirthdayMessage(message);
+    return res.status(202).json({ id: message.id });
+  } catch (err) {
+    console.error("Publish failed:", err);
+    return res.status(503).json({ error: "Message broker unavailable" });
+  }
+});
+  router.get("/", async (_req, res) => {
+    try {
+      const birthdays = await repository.list();
+      return res.json({ birthdays });
+    } catch (err) {
+      console.error("List failed:", err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
+  });
+
+  router.get("/:id", async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    if (!id.success) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+    try {
+      const birthday = await repository.getById(id.data);
+      if (!birthday) {
+        return res.status(404).json({ error: "Birthday not found" });
+      }
+      return res.json(birthday);
+    } catch (err) {
+      console.error("Lookup failed:", err);
+      return res.status(503).json({ error: "Database unavailable" });
+    }
+  });
+
+  return router;
+};
