@@ -118,7 +118,7 @@ onMounted(loadBirthdays);
         <label for="date">Birthday</label>
         <input
           id="date"
-          v-model="form.date"
+          v-model="form.birthday"
           type="date"
           required
         />
