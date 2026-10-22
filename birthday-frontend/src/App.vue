@@ -26,7 +26,7 @@ async function loadBirthdays() {
   error.value = "";
 
   try {
-    const response = await fetch("/api/birthdays");bi
+    const response = await fetch("/api/birthdays");
 
     if (!response.ok) {
       throw new Error("Unable to load birthdays.");
