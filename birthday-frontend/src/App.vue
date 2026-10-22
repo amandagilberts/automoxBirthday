@@ -17,7 +17,7 @@ const success = ref("");
 
 const form = ref({
   name: "",
-  date: "",
+  birthday: "",
   message: "",
 });
 
@@ -26,7 +26,7 @@ async function loadBirthdays() {
   error.value = "";
 
   try {
-    const response = await fetch("/api/birthdays");
+    const response = await fetch("/api/birthdays");bi
 
     if (!response.ok) {
       throw new Error("Unable to load birthdays.");
@@ -48,28 +48,28 @@ async function submitBirthday() {
   submitting.value = true;
   error.value = "";
   success.value = "";
+try {
+  const response = await fetch("/api/birthdays", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: form.value.name,
+      birthday: form.value.birthday,
+    }),
+  });
 
-  try {
-    const response = await fetch("/api/birthdays", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(form.value),
-    });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || "Unable to submit the birthday.");
+  }
 
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new Error(
-        data.error || "Unable to submit the birthday."
-      );
-    }
-
-    success.value = "Birthday message submitted successfully.";
+  success.value = "Birthday submitted successfully.";
 
     form.value = {
       name: "",
-      date: "",
+      birthday: "",
       message: "",
     };
 
